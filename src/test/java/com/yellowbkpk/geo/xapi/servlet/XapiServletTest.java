@@ -85,14 +85,52 @@ public class XapiServletTest {
         execQuery("node[amenity=*]", expected);
     }
 
-    // wildcard tag selection on any type
+    /*
+     * wildcard "any" type selectors have the following documentation (from the XAPI
+     * wiki page at ).
+     *
+     * This returns an xml document containing nodes, ways and relations that match
+     * the search terms. For each matching way the nodes and referenced by that way
+     * are also returned. Likewise, for each matching relation the ways and nodes
+     * referenced by that relation are also returned.
+     */
+
+    // wildcard tag selection on any type (which matches nodes)
     @Test
-    public void testTagAnyWildcardSelection() {
+    public void testTagAnyWildcardSelectionMatchingNode() {
         HashSet<EntityRef> expected = new HashSet<EntityRef>();
         expected.add(new EntityRef(EntityType.Node, 1));
         expected.add(new EntityRef(EntityType.Node, 2));
         expected.add(new EntityRef(EntityType.Node, 3));
         execQuery("*[amenity=*]", expected);
+    }
+
+    // wildcard tag selection on any type (which matches ways and should bring in the
+    // needed nodes)
+    @Test
+    public void testTagAnyWildcardSelectionMatchingWay() {
+        HashSet<EntityRef> expected = new HashSet<EntityRef>();
+        // matching relation
+        expected.add(new EntityRef(EntityType.Way, 1));
+        expected.add(new EntityRef(EntityType.Way, 2));
+        // and the referenced nodes
+        expected.add(new EntityRef(EntityType.Node, 1));
+        expected.add(new EntityRef(EntityType.Node, 2));
+        expected.add(new EntityRef(EntityType.Node, 3));
+        execQuery("*[highway=*]", expected);
+    }
+
+    // wildcard tag selection on any type (which matches relations and should bring in
+    // the needed members)
+    @Test
+    public void testTagAnyWildcardSelectionMatchingRelation() {
+        HashSet<EntityRef> expected = new HashSet<EntityRef>();
+        // matching relations
+        expected.add(new EntityRef(EntityType.Relation, 1));
+        // referenced members
+        expected.add(new EntityRef(EntityType.Way, 1));
+        expected.add(new EntityRef(EntityType.Node, 1));
+        execQuery("*[type=*]", expected);
     }
 
     // select by tag using multiple keys
@@ -137,6 +175,30 @@ public class XapiServletTest {
         expected.add(new EntityRef(EntityType.Node, 3));
         expected.add(new EntityRef(EntityType.Node, 4));
         execQuery("node[bbox=-0.01,-0.01,0.01,0.01]", expected);
+    }
+
+    @Test
+    public void testBboxWaySelection() {
+        HashSet<EntityRef> expected = new HashSet<EntityRef>();
+        expected.add(new EntityRef(EntityType.Way, 1));
+        // referenced nodes are also returned
+        expected.add(new EntityRef(EntityType.Node, 1));
+        expected.add(new EntityRef(EntityType.Node, 2));
+        expected.add(new EntityRef(EntityType.Node, 3));
+        execQuery("way[bbox=-0.01,-0.01,0.01,0.01]", expected);
+    }
+
+    @Test
+    public void testBboxRelationSelection() {
+        HashSet<EntityRef> expected = new HashSet<EntityRef>();
+        expected.add(new EntityRef(EntityType.Relation, 1));
+        // referenced members are also returned
+        expected.add(new EntityRef(EntityType.Way, 1));
+        expected.add(new EntityRef(EntityType.Node, 1));
+        // and second-order references to nodes
+        expected.add(new EntityRef(EntityType.Node, 2));
+        expected.add(new EntityRef(EntityType.Node, 3));
+        execQuery("relation[bbox=-0.01,-0.01,0.01,0.01]", expected);
     }
 
     @Test
@@ -228,6 +290,12 @@ public class XapiServletTest {
     public void testRelationHasNodeMember() {
         HashSet<EntityRef> expected = new HashSet<EntityRef>();
         expected.add(new EntityRef(EntityType.Relation, 1));
+        // also returns referenced member...
+        expected.add(new EntityRef(EntityType.Node, 1));
+        expected.add(new EntityRef(EntityType.Way, 1));
+        // and referenced nodes from the way...
+        expected.add(new EntityRef(EntityType.Node, 2));
+        expected.add(new EntityRef(EntityType.Node, 3));
         execQuery("relation[node]", expected);
     }
 
