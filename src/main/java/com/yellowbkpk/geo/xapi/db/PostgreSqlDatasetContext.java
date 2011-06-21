@@ -609,22 +609,8 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 		
 		LOG.finer("Updating query analyzer statistics on the temporary ways table.");
 		jdbcTemplate.update("ANALYZE bbox_ways");
-		
-		LOG.finer("Selecting all nodes for selected ways.");
-		jdbcTemplate.update("CREATE TEMPORARY TABLE bbox_way_nodes (id bigint) ON COMMIT DROP");
-		jdbcTemplate.queryForList("SELECT unnest_bbox_way_nodes()");
-		jdbcTemplate.update(
-				"CREATE TEMPORARY TABLE bbox_missing_way_nodes ON COMMIT DROP AS "
-				+ "SELECT buwn.id FROM (SELECT DISTINCT bwn.id FROM bbox_way_nodes bwn) buwn "
-				+ "WHERE NOT EXISTS ("
-				+ "    SELECT * FROM bbox_nodes WHERE id = buwn.id"
-				+ ");"
-		);
-		jdbcTemplate.update("ALTER TABLE ONLY bbox_missing_way_nodes"
-				+ " ADD CONSTRAINT pk_bbox_missing_way_nodes PRIMARY KEY (id)");
-		jdbcTemplate.update("ANALYZE bbox_missing_way_nodes");
-		rowCount = jdbcTemplate.update("INSERT INTO bbox_nodes "
-				+ "SELECT n.* FROM nodes n INNER JOIN bbox_missing_way_nodes bwn ON n.id = bwn.id;");
+
+        rowCount = addMissingNodesFromBboxWays();
 		LOG.finer(rowCount + " rows affected.");
 		
 		LOG.finer("Updating query analyzer statistics on the temporary nodes table.");
@@ -666,12 +652,15 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 			double bottom = boundingBox.getBottom();
 			bounds.add(new Bound(right, left, top, bottom, "Osmosis " + OsmosisConstants.VERSION));
 		}
-		
+
+        String bboxWhereStr = buildBboxWhereClause(bboxSelectors);
 		String tagsWhereStr = buildSelectorWhereClause(tagSelectors);
 		List<Object> tagsWhereObj = buildSelectorWhereParameters(tagSelectors);
+        List<Object> bboxWhereObj = buildBboxWhereParameters(bboxSelectors);
 		List<Object> objArgs = new LinkedList<Object>();
+        objArgs.addAll(bboxWhereObj);
 		objArgs.addAll(tagsWhereObj);
-		
+
 		// PostgreSQL sometimes incorrectly chooses to perform full table scans, these options
 		// prevent this. Note that this is not recommended practice according to documentation
 		// but fixing this would require modifying the table statistics gathering
@@ -681,32 +670,48 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 		jdbcTemplate.update("SET enable_hashjoin = false");
 		
 		LOG.finer("Selecting all relations matching tags.");
-		rowCount = jdbcTemplate.update(
-				"CREATE TEMPORARY TABLE bbox_relations ON COMMIT DROP AS"
-				+ " SELECT * FROM relations WHERE " + tagsWhereStr,
-				objArgs.toArray());
-		
+        StringBuilder sql = buildBboxAndTagsQueryString("bbox_relations", "relations", bboxSelectors, bboxWhereStr, tagSelectors, tagsWhereStr);
+		rowCount = jdbcTemplate.update(sql.toString(), objArgs.toArray());
+
 		LOG.finer("Adding a primary key to the temporary relations table.");
 		jdbcTemplate.update("ALTER TABLE ONLY bbox_relations ADD CONSTRAINT pk_bbox_relations PRIMARY KEY (id)");
 		
 		LOG.finer("Updating query analyzer statistics on the temporary nodes table.");
 		jdbcTemplate.update("ANALYZE bbox_relations");
-		
+
+        addMissingWaysNodesAndRelationsFromBboxRelations();
+        rowCount = addMissingNodesFromBboxWays();
+
 		// Create iterators for the selected records for each of the entity types.
 		LOG.finer("Iterating over results.");
 		resultSets = new ArrayList<ReleasableIterator<EntityContainer>>();
 		resultSets.add(
 				new UpcastIterator<EntityContainer, BoundContainer>(
 						new BoundContainerIterator(new ReleasableAdaptorForIterator<Bound>(bounds.iterator()))));
-		resultSets.add(
-				new UpcastIterator<EntityContainer, RelationContainer>(
-						new RelationContainerIterator(relationDao.iterate("bbox_"))));
-		
+        resultSets.add(
+                new UpcastIterator<EntityContainer, NodeContainer>(
+                        new NodeContainerIterator(nodeDao.iterate("bbox_"))));
+        resultSets.add(
+                new UpcastIterator<EntityContainer, WayContainer>(
+                        new WayContainerIterator(wayDao.iterate("bbox_"))));
+        resultSets.add(
+                new UpcastIterator<EntityContainer, RelationContainer>(
+                        new RelationContainerIterator(relationDao.iterate("bbox_"))));
+
 		// Merge all readers into a single result iterator and return.			
 		return new MultipleSourceIterator<EntityContainer>(resultSets);
 	}
 
 
+    /*
+     * wildcard "any" type selectors have the following documentation (from the XAPI
+     * wiki page at ).
+     *
+     * This returns an xml document containing nodes, ways and relations that match
+     * the search terms. For each matching way the nodes and referenced by that way
+     * are also returned. Likewise, for each matching relation the ways and nodes
+     * referenced by that relation are also returned.
+     */
 	public ReleasableIterator<EntityContainer> iterateSelectedPrimitives(
 			List<Selector.BoundingBox> bboxSelectors, List<Selector> tagSelectors) {
 		ArrayList<Bound> bounds = new ArrayList<Bound>();
@@ -744,23 +749,7 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 		
 		// Select all nodes inside the box into the node temp table.
 		LOG.finer("Selecting all nodes inside bounding box.");
-		StringBuilder sql = new StringBuilder("CREATE TEMPORARY TABLE bbox_nodes ON COMMIT DROP AS SELECT * FROM nodes ");
-		if(bboxWhereObj.size() > 0 || tagSelectors.size() > 0) {
-			sql.append("WHERE ");
-			if(bboxWhereObj.size() > 0) {
-				sql.append("(");
-				sql.append(bboxWhereStr);
-				sql.append(")");
-				if(tagSelectors.size() > 0) {
-					sql.append(" AND ");
-				}
-			}
-			if(tagSelectors.size() > 0) {
-				sql.append("(");
-				sql.append(tagsWhereStr);
-				sql.append(")");
-			}
-		}
+		StringBuilder sql = buildBboxAndTagsQueryString("bbox_nodes", "nodes", bboxSelectors, bboxWhereStr, tagSelectors, tagsWhereStr);
 		rowCount = jdbcTemplate.update(sql.toString(), objArgs.toArray());
 		
 		LOG.finer("Adding a primary key to the temporary nodes table.");
@@ -773,23 +762,7 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 		LOG.finer("Selecting all ways inside bounding box using way linestring geometry.");
 		// We have full way geometry available so select ways
 		// overlapping the requested bounding box.
-		sql = new StringBuilder("CREATE TEMPORARY TABLE bbox_ways ON COMMIT DROP AS SELECT * FROM ways ");
-		if(bboxWhereObj.size() > 0 || tagSelectors.size() > 0) {
-			sql.append("WHERE ");
-			if(bboxWhereObj.size() > 0) {
-				sql.append("(");
-				sql.append(bboxWhereStr.replaceAll("geom", "linestring")); //FIXME
-				sql.append(")");
-				if(tagSelectors.size() > 0) {
-					sql.append(" AND ");
-				}
-			}
-			if(tagSelectors.size() > 0) {
-				sql.append("(");
-				sql.append(tagsWhereStr);
-				sql.append(")");
-			}
-		}
+		sql = buildBboxAndTagsQueryString("bbox_ways", "ways", bboxSelectors, bboxWhereStr, tagSelectors, tagsWhereStr);
 		rowCount = jdbcTemplate.update(sql.toString(), objArgs.toArray());
 			
 		LOG.finer(rowCount + " rows affected.");
@@ -799,24 +772,13 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 		
 		LOG.finer("Updating query analyzer statistics on the temporary ways table.");
 		jdbcTemplate.update("ANALYZE bbox_ways");
-		
+
 		// Select all relations containing the nodes or ways into the relation table.
 		LOG.finer("Selecting all relation ids containing selected nodes or ways.");
-		rowCount = jdbcTemplate.update(
-			"CREATE TEMPORARY TABLE bbox_relations ON COMMIT DROP AS"
-				+ " SELECT r.* FROM relations r"
-				+ " INNER JOIN ("
-				+ "    SELECT relation_id FROM ("
-				+ "        SELECT rm.relation_id AS relation_id FROM relation_members rm"
-				+ "        INNER JOIN bbox_nodes n ON rm.member_id = n.id WHERE rm.member_type = 'N' "
-				+ "        UNION "
-				+ "        SELECT rm.relation_id AS relation_id FROM relation_members rm"
-				+ "        INNER JOIN bbox_ways w ON rm.member_id = w.id WHERE rm.member_type = 'W'"
-				+ "     ) rids GROUP BY relation_id"
-				+ ") rids ON r.id = rids.relation_id"
-		);
+        sql = buildBboxAndTagsQueryString("bbox_relations", "relations", bboxSelectors, bboxWhereStr, tagSelectors, tagsWhereStr);
+		rowCount = jdbcTemplate.update(sql.toString(), objArgs.toArray());
 		LOG.finer(rowCount + " rows affected.");
-		
+
 		LOG.finer("Adding a primary key to the temporary relations table.");
 		jdbcTemplate.update("ALTER TABLE ONLY bbox_relations ADD CONSTRAINT pk_bbox_relations PRIMARY KEY (id)");
 		
@@ -883,7 +845,6 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 		// Merge all readers into a single result iterator and return.			
 		return new MultipleSourceIterator<EntityContainer>(resultSets);
 	}
-
 
 	public ReleasableIterator<EntityContainer> iterateNodes(
 			List<Long> ids) {
@@ -989,6 +950,39 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 	}
 
 
+    private StringBuilder buildBboxAndTagsQueryString(
+            String tmpTableName, String tableName,
+            List<Selector.BoundingBox> bboxSelectors, String bboxWhereStr,
+            List<Selector> tagSelectors, String tagsWhereStr) {
+        StringBuilder sql = new StringBuilder("CREATE TEMPORARY TABLE ");
+        sql.append(tmpTableName);
+        sql.append(" ON COMMIT DROP AS SELECT * FROM ");
+        sql.append(tableName);
+        sql.append(" ");
+		if(bboxSelectors.size() > 0 || tagSelectors.size() > 0) {
+			sql.append("WHERE ");
+			if(!bboxSelectors.isEmpty()) {
+				sql.append("(");
+                // TODO: better way to deal with the column name difference for the ways table.
+                if (tableName.equals("ways")) {
+                    sql.append(bboxWhereStr.replaceAll("geom", "linestring"));
+                } else {
+				    sql.append(bboxWhereStr);
+                }
+				sql.append(")");
+				if(!tagSelectors.isEmpty()) {
+					sql.append(" AND ");
+				}
+			}
+			if(!tagSelectors.isEmpty()) {
+				sql.append("(");
+				sql.append(tagsWhereStr);
+				sql.append(")");
+			}
+		}
+        return sql;
+    }
+
 	private String buildListSql(List<Long> ids) {
 		StringBuilder idsSql = new StringBuilder("(");
         Iterator<Long> iterator = ids.iterator();
@@ -1042,4 +1036,44 @@ public class PostgreSqlDatasetContext implements DatasetContext {
 		return new MultipleSourceIterator<EntityContainer>(resultSets);
 	
 	}
+
+    private int addMissingNodesFromBboxWays() {
+        LOG.finer("Selecting all nodes for selected ways.");
+        jdbcTemplate.update("CREATE TEMPORARY TABLE bbox_way_nodes (id bigint) ON COMMIT DROP");
+        jdbcTemplate.queryForList("SELECT unnest_bbox_way_nodes()");
+        jdbcTemplate.update(
+                "CREATE TEMPORARY TABLE bbox_missing_way_nodes ON COMMIT DROP AS "
+                + "SELECT buwn.id FROM (SELECT DISTINCT bwn.id FROM bbox_way_nodes bwn) buwn "
+                + "WHERE NOT EXISTS ("
+                + "    SELECT * FROM bbox_nodes WHERE id = buwn.id"
+                + ");"
+        );
+        jdbcTemplate.update("ALTER TABLE ONLY bbox_missing_way_nodes"
+                + " ADD CONSTRAINT pk_bbox_missing_way_nodes PRIMARY KEY (id)");
+        jdbcTemplate.update("ANALYZE bbox_missing_way_nodes");
+        return jdbcTemplate.update("INSERT INTO bbox_nodes "
+                + "SELECT n.* FROM nodes n INNER JOIN bbox_missing_way_nodes bwn ON n.id = bwn.id;");
+    }
+
+    private void addMissingWaysNodesAndRelationsFromBboxRelations() {
+        LOG.finer("Selecting all ways and nodes for selected relations.");
+        jdbcTemplate.update(
+                "CREATE TEMPORARY TABLE bbox_nodes ON COMMIT DROP AS " +
+                "SELECT n.* FROM nodes n JOIN relation_members rm ON n.id=rm.member_id " +
+                "WHERE rm.member_type='N' " +
+                "AND rm.relation_id IN (SELECT id from bbox_relations)");
+        jdbcTemplate.update(
+                "CREATE TEMPORARY TABLE bbox_ways ON COMMIT DROP AS " +
+                "SELECT w.* FROM ways w JOIN relation_members rm ON w.id=rm.member_id " +
+                "WHERE rm.member_type='W' " +
+                "AND rm.relation_id IN (SELECT id from bbox_relations)");
+        // this one goes last - we're not getting the members of the relation members of the
+        // relations that were selected. confusing, huh?
+        jdbcTemplate.update(
+                "INSERT INTO bbox_relations " +
+                "SELECT r.* FROM relations r JOIN relation_members rm ON r.id=rm.member_id " +
+                "WHERE rm.member_type='R' " +
+                "AND rm.relation_id IN (SELECT id from bbox_relations) " +
+                "AND r.id NOT IN (SELECT id from bbox_relations)");
+    }
 }
