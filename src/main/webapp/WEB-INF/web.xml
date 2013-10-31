@@ -1,7 +1,31 @@
 <web-app xmlns="http://java.sun.com/xml/ns/j2ee" version="2.4"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http:/java.sun.com/dtd/web-app_2_3.dtd">
-  
+  <context-param>
+    <param-name>xapi.max_bbox_area</param-name>
+    <param-value>10.0</param-value>
+  </context-param>
+  <context-param>
+    <param-name>xapi.db.host</param-name>
+    <param-value>localhost</param-value>
+  </context-param>
+  <context-param>
+    <param-name>xapi.db.username</param-name>
+    <param-value>xapi</param-value>
+  </context-param>
+  <context-param>
+    <param-name>xapi.db.password</param-name>
+    <param-value>xapi</param-value>
+  </context-param>
+  <context-param>
+    <param-name>xapi.db.database</param-name>
+    <param-value>xapi</param-value>
+  </context-param>
+  <context-param>
+    <param-name>xapi.workingDirectory</param-name>
+    <param-value>.</param-value>
+  </context-param>
+
   <servlet>
     <servlet-name>Api</servlet-name>
     <servlet-class>com.yellowbkpk.geo.xapi.servlet.ApiServlet</servlet-class>
@@ -11,6 +35,18 @@
     <url-pattern>/api/0.6/node/*</url-pattern>
     <url-pattern>/api/0.6/way/*</url-pattern>
     <url-pattern>/api/0.6/relation/*</url-pattern>
+    <url-pattern>/api/0.6/nodes</url-pattern>
+    <url-pattern>/api/0.6/ways</url-pattern>
+    <url-pattern>/api/0.6/relations</url-pattern>
+  </servlet-mapping>
+ 
+  <servlet>
+    <servlet-name>TiledApi</servlet-name>
+    <servlet-class>com.yellowbkpk.geo.xapi.servlet.TiledApiServlet</servlet-class>
+  </servlet>
+  <servlet-mapping>
+  	<servlet-name>TiledApi</servlet-name>
+  	<url-pattern>/api/0.6/tiled/*</url-pattern>
   </servlet-mapping>
   
   <servlet>
@@ -41,6 +77,26 @@
   	<url-pattern>/admin/stats</url-pattern>
   </servlet-mapping>
   
+  <servlet>
+    <servlet-name>IpBlock</servlet-name>
+    <servlet-class>com.yellowbkpk.geo.xapi.admin.IpBlockServlet</servlet-class>
+  </servlet>
+  <servlet-mapping>
+    <servlet-name>IpBlock</servlet-name>
+    <url-pattern>/admin/block</url-pattern>
+  </servlet-mapping>
+  
+  <filter>
+    <filter-name>RemoteIpFilter</filter-name>
+    <filter-class>org.apache.catalina.filters.RemoteIpFilter</filter-class>
+  </filter>
+
+  <filter-mapping>
+    <filter-name>RemoteIpFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
   <!-- 
   <servlet>
   	<servlet-name>Killer</servlet-name>

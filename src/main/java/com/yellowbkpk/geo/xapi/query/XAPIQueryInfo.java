@@ -5,102 +5,96 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
+import org.postgis.Point;
+
 import com.yellowbkpk.geo.xapi.db.Selector;
+import com.yellowbkpk.geo.xapi.db.SelectorGroup;
 import com.yellowbkpk.geo.xapi.servlet.Filetype;
 
 public class XAPIQueryInfo {
-	
-	public enum RequestType {
-		ALL("*"),
-		NODE("node"),
-		WAY("way"),
-		RELATION("relation"),
-		MAP("map");
-		
-		private static Map<String, RequestType> val = new HashMap<String, RequestType>();
-		static {
-			for (RequestType i : values()) {
-				val.put(i.t, i);
-			}
-		}
-		private String t;
-		private RequestType(String t) {
-			this.t = t;
-		}
-		public static RequestType fromValue(String v) {
-			return val.get(v);
-		}
+
+    public enum RequestType {
+        ALL("*"), NODE("node"), WAY("way"), RELATION("relation"), MAP("map");
+
+        private static Map<String, RequestType> val = new HashMap<String, RequestType>();
+        static {
+            for (RequestType i : values()) {
+                val.put(i.t, i);
+            }
+        }
+        private String t;
+
+        private RequestType(String t) {
+            this.t = t;
+        }
+
+        public static RequestType fromValue(String v) {
+            return val.get(v);
+        }
+
         public String getT() {
             return t;
         }
-	}
+    }
 
-	private RequestType type;
-	private List<Selector.BoundingBox> boundingBoxes;
-	private List<Selector> selectors;
-	private Filetype filetype;
+    private RequestType type;
+    private List<Selector> selectors;
+    private Filetype filetype;
 
-	private XAPIQueryInfo(RequestType type, Filetype filetype, List<Selector> selectors, List<Selector.BoundingBox> bboxSelectors) {
-		this.type = type;
-		this.filetype = filetype;
-		this.selectors = selectors;
-		this.boundingBoxes = bboxSelectors;
-	}
-	
-	public static XAPIQueryInfo fromString(String str) throws XAPIParseException {
+    private XAPIQueryInfo(RequestType type, Filetype filetype, List<Selector> selectors) {
+        this.type = type;
+        this.filetype = filetype;
+        this.selectors = selectors;
+    }
+
+    public static XAPIQueryInfo fromString(String str) throws XAPIParseException {
         ParseState state = new ParseState(str);
         List<Selector> selectors = new LinkedList<Selector>();
-        List<Selector.BoundingBox> bboxSelectors = new LinkedList<Selector.BoundingBox>();
 
         RequestType type = parseRequestType(state);
         Filetype ftype = Filetype.xml;
-		if (type == RequestType.MAP) {
-        	ftype = parseFiletype(state);
-        	state.expect("?");
-            bboxSelectors.add(parseBboxSelector(state));
+        if (type == RequestType.MAP) {
+            ftype = parseFiletype(state);
+            state.expect("?");
+            if ("bbox".equals(state.peek(4))) {
+                selectors.add(parseBboxSelector(state));
+            } else if ("poly".equals(state.peek(4))) {
+                selectors.add(parsePolygonSelector(state));
+            }
 
         } else {
-			while (state.hasRemaining()) {
-				// FIXME This peek check seems ugly.
-				String nextChar = state.peek(1);
-				if ("[".equals(nextChar)) {
-					List<Selector> sels = parseBracketedSelector(state, type);
-					for (Selector sel : sels) {
-						if (sel instanceof Selector.BoundingBox) {
-							bboxSelectors.add((Selector.BoundingBox) sel);
-						} else {
-							selectors.add(sel);
-						}
-					}
-				} else if(".".equals(nextChar)) {
-					ftype = parseFiletype(state);
-				} else {
-					throw new XAPIParseException("Unknown text");
-				}
-			}
+            while (state.hasRemaining()) {
+                // FIXME This peek check seems ugly.
+                String nextChar = state.peek(1);
+                if ("[".equals(nextChar)) {
+                    List<Selector> sels = parseBracketedSelector(state, type);
+                    selectors.addAll(sels);
+                } else if (".".equals(nextChar)) {
+                    ftype = parseFiletype(state);
+                } else {
+                    throw new XAPIParseException("Unknown text");
+                }
+            }
         }
-        
 
-        return new XAPIQueryInfo(type, ftype, selectors, bboxSelectors);
-	}
+        return new XAPIQueryInfo(type, ftype, selectors);
+    }
 
     private static Filetype parseFiletype(ParseState state) throws XAPIParseException {
-		if(state.canConsume(".")) {
-			if(state.canConsume("xml")) {
-				return Filetype.xml;
-			} else if(state.canConsume("json")) {
-				return Filetype.json;
-			} else if(state.canConsume("pbf")) {
-				return Filetype.pbf;
-			} else {
-				throw new XAPIParseException("Unknown filetype specified.");
-			}
-		} else {
-			return null;
-		}
-	}
+        if (state.canConsume(".")) {
+            if (state.canConsume("xml")) {
+                return Filetype.xml;
+            } else if (state.canConsume("json")) {
+                return Filetype.json;
+            } else {
+                throw new XAPIParseException("Unknown filetype specified.");
+            }
+        } else {
+            return null;
+        }
+    }
 
-	private static class ParseState {
+    private static class ParseState {
         private StringBuffer buf = null;
 
         ParseState(String s) {
@@ -185,8 +179,12 @@ public class XAPIQueryInfo {
             if (state.canConsume("=")) {
                 if (maybeKeys.size() == 1 && maybeKeys.get(0).equals("bbox")) {
                     selectors.add(parseBboxRHS(state));
+                } else if (maybeKeys.size() == 1 && maybeKeys.get(0).equals("poly")) {
+                    selectors.add(parsePolygonRHS(state));
                 } else if (maybeKeys.size() > 0) {
-                    selectors.addAll(parseTagSelectors(maybeKeys, state));
+                    List<Selector> tagSelectors = parseTagSelectors(maybeKeys, state);
+                    SelectorGroup tagGroup = new SelectorGroup(tagSelectors);
+                    selectors.add(tagGroup);
                 } else {
                     throw new XAPIParseException("Cannot parse tag query with unescaped special characters.");
                 }
@@ -195,7 +193,8 @@ public class XAPIQueryInfo {
                 if (maybeKeys.size() == 1) {
                     selectors.add(parseChildPredicate(maybeKeys.get(0), type));
                 } else {
-                    throw new XAPIParseException("Cannot parse - expression does not look like child predicate selector.");
+                    throw new XAPIParseException(
+                            "Cannot parse - expression does not look like child predicate selector.");
                 }
             }
         }
@@ -243,11 +242,13 @@ public class XAPIQueryInfo {
                     selector = Selector.ChildPredicate.RelationMember.relation(negateTest);
 
                 } else {
-                    throw new XAPIParseException("Unexpected child predicate on relation. Expected: node, way, relation or tag.");
+                    throw new XAPIParseException(
+                            "Unexpected child predicate on relation. Expected: node, way, relation or tag.");
                 }
 
             } else {
-                throw new XAPIParseException("Child predicate on request types other than node, way and relation are not supported.");
+                throw new XAPIParseException(
+                        "Child predicate on request types other than node, way and relation are not supported.");
             }
         }
 
@@ -262,12 +263,12 @@ public class XAPIQueryInfo {
         return selector;
     }
 
-    private static Selector.BoundingBox parseBboxSelector(ParseState state) throws XAPIParseException {
+    private static Selector.Polygon parseBboxSelector(ParseState state) throws XAPIParseException {
         state.expect("bbox=");
         return parseBboxRHS(state);
     }
 
-    private static Selector.BoundingBox parseBboxRHS(ParseState state) throws XAPIParseException {
+    private static Selector.Polygon parseBboxRHS(ParseState state) throws XAPIParseException {
         Double left = parseDouble(state);
         state.expect(",");
         Double bottom = parseDouble(state);
@@ -275,37 +276,38 @@ public class XAPIQueryInfo {
         Double right = parseDouble(state);
         state.expect(",");
         Double top = parseDouble(state);
-        
-        if(left > right) {
-        	throw new XAPIParseException("Left is greater than right.");
+
+        if (left > right) {
+            throw new XAPIParseException("Left is greater than right.");
         }
-        
-        if(bottom > top) {
-        	throw new XAPIParseException("Bottom is greater than top.");
+
+        if (bottom > top) {
+            throw new XAPIParseException("Bottom is greater than top.");
         }
-        
-        if(bottom < -90 || bottom > 90) {
-        	throw new XAPIParseException("Bottom is out of range.");
+
+        if (bottom < -90 || bottom > 90) {
+            throw new XAPIParseException("Bottom is out of range.");
         }
-        
-        if(top < -90 || top > 90) {
-        	throw new XAPIParseException("Top is out of range.");
+
+        if (top < -90 || top > 90) {
+            throw new XAPIParseException("Top is out of range.");
         }
-        
-        if(left < -180 || left > 180) {
-        	throw new XAPIParseException("Left is out of range.");
+
+        if (left < -180 || left > 180) {
+            throw new XAPIParseException("Left is out of range.");
         }
-        
-        if(right < -180 || right > 180) {
-        	throw new XAPIParseException("Right is out of range.");
+
+        if (right < -180 || right > 180) {
+            throw new XAPIParseException("Right is out of range.");
         }
-        
-        return new Selector.BoundingBox(left, right, top, bottom);
+
+        return new Selector.Polygon(left, right, top, bottom);
     }
 
     private static void fillDigits(ParseState state, StringBuffer buf) throws XAPIParseException {
         while (state.hasRemaining() && Character.isDigit(state.peek(1).codePointAt(0))) {
-            buf.append(state.peek(1)); state.skip(1);
+            buf.append(state.peek(1));
+            state.skip(1);
         }
     }
 
@@ -359,7 +361,8 @@ public class XAPIQueryInfo {
     private static List<String> parseKeys(ParseState state) throws XAPIParseException {
         List<String> keys = new LinkedList<String>();
 
-        // parse first key, which might have some special characters in it, just not
+        // parse first key, which might have some special characters in it, just
+        // not
         // the pipe character for key separation, or the equals character.
         keys.add(parseUnescaped(state));
 
@@ -373,19 +376,18 @@ public class XAPIQueryInfo {
     }
 
     enum SpecialChar {
-        LEFT_SQ_BRACKET("["),
-        RIGHT_SQ_BRACKET("]"),
-        LEFT_PAREN("["),
-        RIGHT_PAREN("]"),
-        ASTERISK("*"),
-        KV_SEPARATOR("|"),
-        KEY_SEPARATOR("=");
+        LEFT_SQ_BRACKET("["), RIGHT_SQ_BRACKET("]"), LEFT_PAREN("["), RIGHT_PAREN("]"), ASTERISK("*"), KV_SEPARATOR("|"), KEY_SEPARATOR(
+                "=");
 
         private String s;
+
         SpecialChar(String str) {
             s = str;
         }
-        String getS() { return s; }
+
+        String getS() {
+            return s;
+        }
     }
 
     private static boolean hasSpecialCharacters(String s) throws XAPIParseException {
@@ -430,10 +432,11 @@ public class XAPIQueryInfo {
     }
 
     /**
-     * Parse a string from the parser state, allowing special characters except for the multiple key separator and
-     * key/value separator ('|' and '=').
-     *
-     * @param state Parser state.
+     * Parse a string from the parser state, allowing special characters except
+     * for the multiple key separator and key/value separator ('|' and '=').
+     * 
+     * @param state
+     *            Parser state.
      * @return String read from parser.
      * @throws XAPIParseException
      */
@@ -477,64 +480,79 @@ public class XAPIQueryInfo {
         } while (true);
     }
 
-    /*
-	private static Selector.Polygon buildPolygonSelector(Tree predicateTree) {
-		String encoded = predicateTree.getChild(0).getText();
-		
-		Point[] points = decodePolygonString(encoded);
-		return new Selector.Polygon(points);
-	}
+    /**
+     * Same as parseUnescaped() but instead of erroring at the end of the buffer
+     * it returns the string that had been parsed up to that point.
+     */
+    private static String parseToEndOfSection(ParseState state) throws XAPIParseException {
+        StringBuffer buf = new StringBuffer();
+        do {
+            if(!state.hasRemaining()) {
+                return buf.toString();
+            }
+            String next = state.peek(1);
+            if (next.equals("]")) {
+                if (buf.length() < 1) {
+                    throw new XAPIParseException("Unable to find a string at '" + state.peek(1) + "'.");
+                }
 
-	private static Point[] decodePolygonString(String encoded) {
-		int i = 0;
-		char[] charArray = encoded.toCharArray();
-		List<Point> points = new LinkedList<Point>();
-		
-		while(i < charArray.length) {
-			char b;
-			int shift = 0;
-			int result = 0;
-			float lat = 0;
-			float lon = 0;
-			do {
-				b = (char) (charArray[i++] - 63);
-				result |= (b & 0x1f) << shift;
-				shift += 5;
-			} while(b >= 0x20);
-			float dlat = (((result & 1) > 0) ? ~(result >> 1) : (result >> 1));
-			lat += dlat;
-			
-			shift = 0;
+                return buf.toString();
+            }
+            buf.append(next);
+            state.skip(1);
+        } while (true);
+    }
+    
+    private static Selector.Polygon parsePolygonSelector(ParseState state) throws XAPIParseException {
+        state.expect("poly=");
+        return parsePolygonRHS(state);
+    }
+
+    private static Selector.Polygon parsePolygonRHS(ParseState state) throws XAPIParseException {
+        int i = 0;
+        String chars = parseToEndOfSection(state);
+        List<Point> points = new LinkedList<Point>();
+        float lat = 0;
+        float lon = 0;
+
+        while (i < chars.length()) {
+            int b;
+            int shift = 0;
+            int result = 0;
+            do {
+                b = chars.charAt(i++) - 63;
+                result |= (b & 0x1f) << shift;
+                shift += 5;
+            } while (b >= 0x20);
+            float dlat = (((result & 1) > 0) ? ~(result >> 1) : (result >> 1));
+            lat += dlat;
+
+            shift = 0;
             result = 0;
             do {
-                  b = (char) (charArray[i++] - 63);
-                  result |= (b & 0x1f) << shift;
-                  shift += 5;
+                b = chars.charAt(i++) - 63;
+                result |= (b & 0x1f) << shift;
+                shift += 5;
             } while (b >= 0x20);
             float dlng = (((result & 1) > 0) ? ~(result >> 1) : (result >> 1));
             lon += dlng;
-            
+
             points.add(new Point(lon * 1e-5, lat * 1e-5));
-		}
-		
-		return points.toArray(new Point[] {});
-	}
-	*/
+        }
 
-	public RequestType getKind() {
-		return type;
-	}
+        return new Selector.Polygon(points.toArray(new Point[points.size()]));
+    }
 
-	public List<Selector> getTagSelectors() {
-		return selectors;
-	}
+    public RequestType getKind() {
+        return type;
+    }
 
-	public List<Selector.BoundingBox> getBboxSelectors() {
-		return boundingBoxes;
-	}
+    public List<Selector> getSelectors() {
+        return selectors;
+    }
 
-	public Filetype getFiletype() {
-		return filetype;
-	}
+    public Filetype getFiletype() {
+        return filetype;
+    }
 
 }

@@ -10,6 +10,8 @@ import java.util.Date;
 import java.util.Properties;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
 
 import javax.servlet.ServletException;
@@ -26,22 +28,22 @@ import org.openstreetmap.osmosis.core.time.DateFormatter;
 import org.openstreetmap.osmosis.core.time.DateParser;
 import org.openstreetmap.osmosis.core.util.PropertiesPersister;
 
-import com.yellowbkpk.geo.xapi.admin.RequestFilter;
 import com.yellowbkpk.geo.xapi.admin.XapiQueryStats;
 import com.yellowbkpk.geo.xapi.db.PostgreSqlDatasetContext;
-import com.yellowbkpk.geo.xapi.db.Selector;
-import com.yellowbkpk.geo.xapi.query.XAPIParseException;
-import com.yellowbkpk.geo.xapi.query.XAPIQueryInfo;
 import com.yellowbkpk.geo.xapi.writer.XapiSink;
 
-public class XapiServlet extends HttpServlet {
+public class TiledApiServlet extends HttpServlet {
+
+    private static final long serialVersionUID = 1L;
+
     private static final DatabasePreferences preferences = new DatabasePreferences(false, false);
 
     private static final String LOCAL_STATE_FILE = "state.txt";
 
-    private static Logger log = Logger.getLogger("XAPI");
+    private static Logger log = Logger.getLogger("API");
 
     public void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+        log.info("starting TiledApiServlet doGet");
 
         String host = getServletContext().getInitParameter("xapi.db.host");
         String database = getServletContext().getInitParameter("xapi.db.database");
@@ -51,105 +53,76 @@ public class XapiServlet extends HttpServlet {
                 false, null);
 
         String workingDirectory = getServletContext().getInitParameter("xapi.workingDirectory");
+
         String corsHeaderValue = getServletContext().getInitParameter("xapi.corsHeader");
-        float maxBboxArea = Float.parseFloat(getServletContext().getInitParameter("xapi.max_bbox_area"));
 
         XapiQueryStats tracker = XapiQueryStats.beginTracking(Thread.currentThread());
         try {
             // Parse URL
-            XAPIQueryInfo info = null;
             Filetype filetype = Filetype.xml;
-            String query;
-
+            int zoom, x, y;
             try {
                 StringBuffer urlBuffer = request.getRequestURL();
+                String queryString = request.getQueryString();
                 if (request.getQueryString() != null) {
-                    urlBuffer.append("?").append(request.getQueryString());
+                    urlBuffer.append("?").append(queryString);
                 }
                 String reqUrl = urlBuffer.toString();
+                tracker.receivedUrl(reqUrl, request.getRemoteHost());
 
-                // this ensures that slashes inside any predicate block aren't counted as
-                // part of the URL, for example when other URLs are used in tag queries.
-                int predicateBegin = reqUrl.indexOf('[');
-                if (predicateBegin < 0) {
-                   predicateBegin = reqUrl.length();
+                reqUrl = URLDecoder.decode(reqUrl, "UTF-8");
+
+                log.info("reqUrl: " + reqUrl);
+
+                Pattern pattern = Pattern.compile("\\/api\\/0\\.6\\/tiled\\/(\\d{0,2})\\/(\\d*)\\/(\\d*)");
+                Matcher matcher = pattern.matcher(reqUrl);
+                if (!matcher.find()) {
+                	tracker.error();
+                	response.sendError(500, "Invalid request.");
+                	return;
                 }
 
-                query = reqUrl.substring(reqUrl.lastIndexOf('/', predicateBegin) + 1);
-                query = URLDecoder.decode(query, "UTF-8");
-
-                if (XapiQueryStats.isQueryAlreadyRunning(query, request.getRemoteHost())) {
-                    response.sendError(500, "Ignoring a duplicate request from this address. Be patient!");
-                    tracker.receivedUrl(query, request.getRemoteHost());
-                    tracker.error();
-                    return;
-                }
-
-                tracker.receivedUrl(query, request.getRemoteHost());
-                log.info(query + " starting.");
-                info = XAPIQueryInfo.fromString(query);
-
-                if (info.getFiletype() != null) {
-                    filetype = info.getFiletype();
-                }
-
-            } catch (XAPIParseException e) {
+                zoom = Integer.parseInt(matcher.group(1));
+            	x = Integer.parseInt(matcher.group(2));
+            	y = Integer.parseInt(matcher.group(3));
+            } catch (NumberFormatException e) {
                 tracker.error(e);
                 response.sendError(500, "Could not parse query: " + e.getMessage());
                 return;
             }
 
-            RequestFilter.AddressFilter filter;
-            if((filter = RequestFilter.findFilterForHost(request.getRemoteAddr())) != null) {
-                tracker.error();
-                response.sendError(500, "Your host is blocked: " + filter.getReason());
-                return;
-            }
-
             if (!filetype.isSinkInstalled()) {
-                tracker.error();
                 response.sendError(500, "I don't know how to serialize that.");
                 return;
             }
 
-            if (info.getSelectors().size() < 1) {
-                tracker.error();
-                response.sendError(500, "Must have at least one selector.");
-                return;
+            if (zoom < 12) {
+            	response.sendError(400, "Zoom level is too low.");
+            	return;
             }
 
-            double totalArea = 0;
-            for (Selector bbox : info.getSelectors()) {
-                if (bbox instanceof Selector.Polygon) {
-                    totalArea += ((Selector.Polygon) bbox).area();
-                }
-            }
-            if (totalArea > maxBboxArea) {
-                tracker.error();
-                response.sendError(500, "Maximum bounding box area is " + maxBboxArea + " square degrees.");
-                return;
-            }
+            // Build bounding box from tile
+            double left = tile2lon(x, zoom);
+            double right = tile2lon(x+1, zoom);
+            double top = tile2lat(y, zoom);
+            double bottom = tile2lat(y+1, zoom);
 
             // Query DB
-            PostgreSqlDatasetContext datasetReader = null;
             ReleasableIterator<EntityContainer> bboxData = null;
-            long elements = 0;
+            PostgreSqlDatasetContext datasetReader = null;
             long middle;
+            long elements = 0;
             try {
                 tracker.startDbQuery();
                 long start = System.currentTimeMillis();
                 datasetReader = new PostgreSqlDatasetContext(loginCredentials, preferences);
                 datasetReader.includeTimer(tracker);
 
-                bboxData = makeRequestIterator(datasetReader, info);
-                if (bboxData == null) {
-                    tracker.error();
-                    response.sendError(500, "Unsupported operation.");
-                    return;
-                }
+                bboxData = datasetReader.iterateBoundingBox(left, right, top, bottom, true);
+
                 tracker.startSerialization();
                 middle = System.currentTimeMillis();
-                log.info(query + " complete: " + (middle - start) + "ms");
+                log.info("Tile " + zoom + "/" + x + "/" + y + " complete: " + (middle - start) + "ms");
 
                 // Build up a writer connected to the response output stream
                 response.setContentType(filetype.getContentTypeString());
@@ -203,7 +176,7 @@ public class XapiServlet extends HttpServlet {
             }
 
             long end = System.currentTimeMillis();
-            log.info(query + " serialization complete: " + (end - middle) + "ms");
+            log.info("Tile " + zoom + "/" + x + "/" + y + " serialization complete: " + (end - middle) + "ms");
             tracker.complete();
         } catch (OsmosisRuntimeException e) {
             tracker.error(e);
@@ -217,7 +190,16 @@ public class XapiServlet extends HttpServlet {
         }
     }
 
-    @Override
+    private double tile2lat(int y, int zoom) {
+    	double n = Math.PI - (2.0 * Math.PI * y) / Math.pow(2.0, zoom);
+        return Math.toDegrees(Math.atan(Math.sinh(n)));
+	}
+
+	private double tile2lon(int x, int zoom) {
+		return x / Math.pow(2.0, zoom) * 360.0 - 180.0;
+	}
+
+	@Override
     protected void doOptions(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
         super.doOptions(req, resp);
 
@@ -232,39 +214,5 @@ public class XapiServlet extends HttpServlet {
         PropertiesPersister localStatePersistor = new PropertiesPersister(new File(workingDirectory, LOCAL_STATE_FILE));
         Properties properties = localStatePersistor.load();
         return new DateParser().parse(properties.getProperty("timestamp"));
-    }
-
-    /**
-     * Creates an Osmosis releasable iterator over all the elements which are
-     * selected by the query.
-     *
-     * @param datasetReader
-     *            The database context to use when executing queries.
-     * @param info
-     *            Object encapsulating the query information.
-     * @return An iterator over all the entities which match the query, or null
-     *         if the query could not be executed.
-     */
-    public static ReleasableIterator<EntityContainer> makeRequestIterator(PostgreSqlDatasetContext datasetReader,
-            XAPIQueryInfo info) {
-        ReleasableIterator<EntityContainer> bboxData = null;
-
-        if (XAPIQueryInfo.RequestType.NODE.equals(info.getKind())) {
-            bboxData = datasetReader.iterateSelectedNodes(info.getSelectors());
-        } else if (XAPIQueryInfo.RequestType.WAY.equals(info.getKind())) {
-            bboxData = datasetReader.iterateSelectedWays(info.getSelectors());
-        } else if (XAPIQueryInfo.RequestType.RELATION.equals(info.getKind())) {
-            bboxData = datasetReader.iterateSelectedRelations(info.getSelectors());
-        } else if (XAPIQueryInfo.RequestType.ALL.equals(info.getKind())) {
-            bboxData = datasetReader.iterateSelectedPrimitives(info.getSelectors());
-        } else if (XAPIQueryInfo.RequestType.MAP.equals(info.getKind())) {
-            if (info.getSelectors().size() == 1) {
-                Selector.Polygon boundingBox = (Selector.Polygon) info.getSelectors().get(0);
-                bboxData = datasetReader.iterateBoundingBox(boundingBox.getLeft(), boundingBox.getRight(),
-                        boundingBox.getTop(), boundingBox.getBottom(), true);
-            }
-        }
-
-        return bboxData;
     }
 }

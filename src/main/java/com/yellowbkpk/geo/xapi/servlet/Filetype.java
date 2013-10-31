@@ -4,54 +4,54 @@ import java.io.BufferedWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 
-import org.openstreetmap.osmosis.core.task.v0_6.Sink;
+import com.yellowbkpk.geo.xapi.writer.XapiSink;
 
 public enum Filetype {
-	xml("text/xml; charset=utf-8", "org.openstreetmap.osmosis.xml.v0_6.XmlWriter"),
-	json("text/json", "org.openstreetmap.osmosis.json.v0_6.JsonWriter"),
-	pbf("application/binary", "org.openstreetmap.osmosis.pbf.v0_6.PbfWriter");
-	
-	private final String contentTypeStr;
-	private final String filetypeSinkClassName;
-	private Constructor<Sink> constructor;
-	
-	private Filetype(String contentType, String sinkClass) {
-		this.contentTypeStr = contentType;
-		this.filetypeSinkClassName = sinkClass;
-	}
+    xml("text/xml; charset=utf-8", "com.yellowbkpk.geo.xapi.writer.XapiXmlWriter"),
+    json("application/json", "com.yellowbkpk.geo.xapi.writer.XapiJsonWriter"),
+    geojson("application/geojson", null);
 
-	public String getContentTypeString() {
-		return contentTypeStr;
-	}
+    private final String contentTypeStr;
+    private final String filetypeSinkClassName;
+    private Constructor<XapiSink> constructor;
 
-	public Sink getSink(BufferedWriter writer) {
-		try {
-			if(isSinkInstalled()) {
-				Sink sink = constructor.newInstance(writer);
-				return sink;
-			} else {
-				return null;
-			}
-		} catch (SecurityException e) {
-			throw new RuntimeException("Could not instantiate serialization sink.", e);
-		} catch (InstantiationException e) {
-			throw new RuntimeException("Could not instantiate serialization sink.", e);
-		} catch (IllegalAccessException e) {
-			throw new RuntimeException("Could not instantiate serialization sink.", e);
-		} catch (IllegalArgumentException e) {
-			throw new RuntimeException("Could not instantiate serialization sink.", e);
-		} catch (InvocationTargetException e) {
-			throw new RuntimeException("Could not instantiate serialization sink.", e);
-		}
-	}
+    private Filetype(String contentType, String sinkClass) {
+        this.contentTypeStr = contentType;
+        this.filetypeSinkClassName = sinkClass;
+    }
 
-	public boolean isSinkInstalled() {
-		try {
-			Class<Sink> clazz = (Class<Sink>) Class.forName(filetypeSinkClassName);
-			constructor = clazz.getConstructor(new Class[] {BufferedWriter.class});
-			return true;
-		} catch (Exception e) {
-			return false;
-		}
-	}
+    public String getContentTypeString() {
+        return contentTypeStr;
+    }
+
+    public XapiSink getSink(BufferedWriter writer) {
+        try {
+            if (isSinkInstalled()) {
+                XapiSink sink = constructor.newInstance(writer);
+                return sink;
+            } else {
+                return null;
+            }
+        } catch (SecurityException e) {
+            throw new RuntimeException("Could not instantiate serialization sink.", e);
+        } catch (InstantiationException e) {
+            throw new RuntimeException("Could not instantiate serialization sink.", e);
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException("Could not instantiate serialization sink.", e);
+        } catch (IllegalArgumentException e) {
+            throw new RuntimeException("Could not instantiate serialization sink.", e);
+        } catch (InvocationTargetException e) {
+            throw new RuntimeException("Could not instantiate serialization sink.", e);
+        }
+    }
+
+    public boolean isSinkInstalled() {
+        try {
+            Class<XapiSink> clazz = (Class<XapiSink>) Class.forName(filetypeSinkClassName);
+            constructor = clazz.getConstructor(new Class[] { BufferedWriter.class });
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 }
